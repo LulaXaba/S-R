@@ -4,6 +4,14 @@
 CTrade trade;
 CPositionInfo positionInfo;
 
+// ORB Variables
+static double ORB_High = 0;
+static double ORB_Low = 0;
+static bool ORB_Set = false;
+const int ORB_StartHour = 9;
+const int ORB_StartMinute = 30;
+const int ORB_EndMinute = 45; // ORB from 9:30 to 9:45
+
 //+------------------------------------------------------------------+
 //| Expert Initialization                                           |
 //+------------------------------------------------------------------+
@@ -19,160 +27,117 @@ int OnInit()
 void OnDeinit(const int reason) {}
 
 //+------------------------------------------------------------------+
-//| Expert Tick Function                                            |
-//+------------------------------------------------------------------+
-void OnTick()
-{
-    static double supportResistanceLevel = 0;
-    static bool breakoutConfirmed = false;
-    static bool retestConfirmed = false;
-    static bool isBullish = false;
-    
-    MqlTick lastTick;
-    if(!SymbolInfoTick(_Symbol, lastTick)) return;
-    double currentPrice = lastTick.bid;
-
-    // Identify new support/resistance level if not already set
-    if(supportResistanceLevel == 0)
-    {
-        supportResistanceLevel = IdentifySupportResistance();
-        breakoutConfirmed = false;
-        retestConfirmed = false;
-    }
-
-    // Check for breakout
-    if(!breakoutConfirmed && IsBreakout(supportResistanceLevel))
-    {
-        breakoutConfirmed = true;
-        isBullish = (currentPrice > supportResistanceLevel);
-        Print(isBullish ? "Bullish" : "Bearish", " Breakout at ", supportResistanceLevel);
-    }
-
-    // Check for retest confirmation
-    if(breakoutConfirmed && !retestConfirmed && IsRetestConfirmed(supportResistanceLevel, isBullish))
-    {
-        retestConfirmed = true;
-        Print("Retest Confirmed at ", supportResistanceLevel);
-    }
-
-    // Validate trade entry before execution
-    if(retestConfirmed && IsValidTrade(isBullish))
-    {
-        double atr = iATR(_Symbol, PERIOD_M15, 14);
-        double sl = isBullish ? currentPrice - (atr * 2) : currentPrice + (atr * 2);
-        double tp = isBullish ? currentPrice + (atr * 4) : currentPrice - (atr * 4);
-        PlaceOrder(isBullish, sl, tp);
-        breakoutConfirmed = false;
-        retestConfirmed = false;
-        supportResistanceLevel = 0;
-    }
-}
-
-//+------------------------------------------------------------------+
-//| Check If Position Is Open                                       |
+//| Check if Position Is Open                                       |
 //+------------------------------------------------------------------+
 bool HasOpenPosition()
 {
-    for(int i=PositionsTotal()-1; i>=0; i--)
+    for (int i = PositionsTotal() - 1; i >= 0; i--)
     {
-        if(positionInfo.SelectByIndex(i) && positionInfo.Symbol() == _Symbol && positionInfo.Magic() == 12345)
-            return true;
+        if (positionInfo.SelectByIndex(i))
+        {
+            if (positionInfo.Symbol() == _Symbol && positionInfo.Magic() == 12345) 
+                return true;
+        }
     }
     return false;
 }
 
 //+------------------------------------------------------------------+
-//| Identify Support/Resistance Levels                             |
+//| Calculate Lot Size Dynamically                                 |
 //+------------------------------------------------------------------+
-double IdentifySupportResistance()
+double CalculateLotSize()
 {
-    const int lookback = 50;
-    double highs[], lows[];
-    ArraySetAsSeries(highs, true);
-    ArraySetAsSeries(lows, true);
-    CopyHigh(_Symbol, PERIOD_M15, 0, lookback, highs);
-    CopyLow(_Symbol, PERIOD_M15, 0, lookback, lows);
-    double highest = highs[0], lowest = lows[0];
-    for(int i=1; i<lookback; i++)
+    double riskPercent = 1.0;  // Risk per trade (% of balance)
+    double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+    
+    if (balance <= 0) return 0;
+    
+    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+    double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+    double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+    
+    if (point <= 0 || tickValue <= 0 || tickSize <= 0)
     {
-        if(highs[i] > highest) highest = highs[i];
-        if(lows[i] < lowest) lowest = lows[i];
+        Print("Invalid symbol parameters");
+        return 0;
     }
-    return NormalizeDouble((highest + lowest) / 2, _Digits);
-}
 
-//+------------------------------------------------------------------+
-//| Breakout Detection Using ATR                                    |
-//+------------------------------------------------------------------+
-bool IsBreakout(double supportResistanceLevel)
-{
-    double atr = iATR(_Symbol, PERIOD_M15, 14);
-    double buffer = atr * 0.5;
-    double lastClose = iClose(_Symbol, PERIOD_M15, 1);
-    return (lastClose > supportResistanceLevel + buffer) || (lastClose < supportResistanceLevel - buffer);
-}
-
-//+------------------------------------------------------------------+
-//| Retest Confirmation Using Moving Averages                      |
-//+------------------------------------------------------------------+
-bool IsRetestConfirmed(double supportResistanceLevel, bool isBullish)
-{
-    double shortMA = iMA(_Symbol, PERIOD_M15, 10, 0, MODE_SMA, PRICE_CLOSE);
-    double longMA = iMA(_Symbol, PERIOD_M15, 50, 0, MODE_SMA, PRICE_CLOSE);
-    double lastClose = iClose(_Symbol, PERIOD_M15, 1);
-    return (isBullish && shortMA > longMA && lastClose < supportResistanceLevel) ||
-           (!isBullish && shortMA < longMA && lastClose > supportResistanceLevel);
-}
-
-//+------------------------------------------------------------------+
-//| Trade Validation Using EMA 200, RSI, and 20-50 MA Trend Filter |
-//+------------------------------------------------------------------+
-bool IsValidTrade(bool isBullish)
-{
-    double rsi = iRSI(_Symbol, PERIOD_M15, 14, PRICE_CLOSE);
-    double ema200_M15 = iMA(_Symbol, PERIOD_M15, 200, 0, MODE_EMA, PRICE_CLOSE);
-    double ma20 = iMA(_Symbol, PERIOD_M15, 20, 0, MODE_SMA, PRICE_CLOSE);
-    double ma50 = iMA(_Symbol, PERIOD_M15, 50, 0, MODE_SMA, PRICE_CLOSE);
+    double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    double slDistance = 20 * _Point;  // Example: Fixed 20-pip Stop Loss
     
-    // Higher timeframe (H1) trend confirmation
-    double ema200_H1 = iMA(_Symbol, PERIOD_H1, 200, 0, MODE_EMA, PRICE_CLOSE);
+    if (slDistance <= 0)
+    {
+        Print("Invalid SL distance");
+        return 0;
+    }
     
-    return (isBullish && ma20 > ma50 && ema200_M15 > ema200_H1 && rsi > 50) ||
-           (!isBullish && ma50 > ma20 && ema200_M15 < ema200_H1 && rsi < 50);
+    double riskAmount = balance * (riskPercent / 100.0);
+    double pipValue = (tickValue / tickSize) * point * 10;
+    double lotSize = riskAmount / (slDistance * pipValue);
+
+    // Adjust lot size within broker limits
+    double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+    double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+    double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+    
+    lotSize = MathFloor(lotSize / lotStep) * lotStep;
+    lotSize = MathMax(minLot, MathMin(maxLot, lotSize));
+    
+    return lotSize;
 }
 
 //+------------------------------------------------------------------+
 //| Trade Execution Function                                        |
 //+------------------------------------------------------------------+
-void PlaceOrder(bool isBuy, double sl, double tp)
+void PlaceOrder(bool isBullish, double sl, double tp)
 {
-    if(HasOpenPosition()) return;
-    MqlTick lastTick;
-    if(!SymbolInfoTick(_Symbol, lastTick)) return;
-    double price = isBuy ? lastTick.ask : lastTick.bid;
-    double lotSize = CalculateDynamicLotSize(sl, isBuy);
-    if(lotSize <= 0) return;
+    if (HasOpenPosition())
+    {
+        Print("Position already exists - trade blocked");
+        return;
+    }
     
-    if(isBuy ? trade.Buy(lotSize, _Symbol, price, sl, tp) : trade.Sell(lotSize, _Symbol, price, sl, tp))
-        Print("Trade opened: ", isBuy ? "Buy" : "Sell", " Lots: ", lotSize);
+    MqlTick lastTick;
+    if (!SymbolInfoTick(_Symbol, lastTick))
+    {
+        Print("Failed to get tick data");
+        return;
+    }
+    
+    double price = isBullish ? lastTick.ask : lastTick.bid;
+    double volume = CalculateLotSize();
+
+    if (volume <= 0)
+    {
+        Print("Invalid lot size calculation - Trade blocked");
+        return;
+    }
+    
+    if (isBullish)
+    {
+        if (trade.Buy(volume, _Symbol, price, sl, tp, "Bullish Breakout"))
+            Print("Buy Order Placed: ", volume, " lots at ", price);
+        else
+            Print("Buy Order Failed: Error ", GetLastError());
+    }
+    else
+    {
+        if (trade.Sell(volume, _Symbol, price, sl, tp, "Bearish Breakout"))
+            Print("Sell Order Placed: ", volume, " lots at ", price);
+        else
+            Print("Sell Order Failed: Error ", GetLastError());
+    }
 }
 
 //+------------------------------------------------------------------+
-//| Lot Size Calculation Function                                   |
+//| Check if Current Time is Within ORB Range                      |
 //+------------------------------------------------------------------+
-double CalculateDynamicLotSize(double slPrice, bool isBuy)
+bool IsORBTime()
 {
-    double riskPercent = 1.0;
-    double balance = AccountInfoDouble(ACCOUNT_BALANCE);
-    double riskAmount = balance * riskPercent / 100;
-    double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-    double riskPips = MathAbs(price - slPrice) / _Point;
-    double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-    double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+    MqlDateTime currTime;
+    TimeCurrent(currTime);
     
-    if(tickValue <= 0 || tickSize <= 0) return 0;
-    
-    double pipValue = (tickValue / tickSize) * _Point * 10;
-    double lotSize = riskAmount / (riskPips * pipValue);
-    return lotSize;
+    return (currTime.hour == ORB_StartHour && 
+            currTime.min >= ORB_StartMinute &&
+            currTime.min <= ORB_EndMinute);
 }
